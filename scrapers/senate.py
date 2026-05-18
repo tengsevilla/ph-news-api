@@ -3,7 +3,7 @@ from scrapers.base import HTMLBaseScraper, RawArticle
 
 class SenateScraper(HTMLBaseScraper):
     SOURCE_NAME = "senate"
-    BASE_URL = "https://legacy.senate.gov.ph/press_release/press_releases.asp"
+    BASE_URL = "https://www.senate.gov.ph/press_release/press_releases.asp"
 
     def fetch(self) -> list[RawArticle]:
         articles = []

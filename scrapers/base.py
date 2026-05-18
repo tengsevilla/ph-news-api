@@ -20,11 +20,21 @@ class RSSBaseScraper:
     SOURCE_NAME: str = ""
     FEED_URLS: list = field(default_factory=list)
 
+    _HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
+    }
+
     def fetch(self) -> list[RawArticle]:
         articles = []
         for feed_url in self.FEED_URLS:
             try:
-                feed = feedparser.parse(feed_url)
+                resp = requests.get(feed_url, headers=self._HEADERS, timeout=15)
+                resp.raise_for_status()
+                feed = feedparser.parse(resp.text)
                 for entry in feed.entries:
                     published_at = None
                     if getattr(entry, "published_parsed", None):
