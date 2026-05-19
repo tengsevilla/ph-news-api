@@ -7,6 +7,8 @@ Hybrid classification pipeline:
 """
 import json
 import os
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from openai import OpenAI
 
@@ -41,6 +43,7 @@ def _ai_enrich_batch(
             "py_category": python_meta[i]["category"],
             "py_sentiment": python_meta[i]["sentiment_hint"],
             "py_politicians": python_meta[i]["detected_politicians"],
+            "py_sectors": python_meta[i]["affected_sectors"],
         }
         for i, a in enumerate(articles)
     ]
@@ -83,10 +86,14 @@ def _merge_python_into_topic(topic: dict, group_meta: list[dict]) -> None:
         "category",
         majority_vote([m["category"] for m in group_meta]),
     )
-    topic.setdefault(
-        "affected_sectors",
-        merge_sectors([m["affected_sectors"] for m in group_meta]),
-    )
+    python_sectors = merge_sectors([m["affected_sectors"] for m in group_meta])
+    raw_ai_sectors = topic.get("affected_sectors") or []
+    # Normalize: AI sometimes returns bare strings instead of {slug, intensity} dicts
+    ai_sectors = [
+        s if isinstance(s, dict) else {"slug": s, "intensity": "medium"}
+        for s in raw_ai_sectors
+    ]
+    topic["affected_sectors"] = merge_sectors([python_sectors, ai_sectors])
     topic["keywords"] = merge_unique([m["keywords"] for m in group_meta])[:8]
     topic["policy_tags"] = merge_unique([m["policy_tags"] for m in group_meta])
     topic.setdefault(
@@ -112,27 +119,35 @@ def _merge_python_into_topic(topic: dict, group_meta: list[dict]) -> None:
         topic.setdefault("impact_level", "regional")
 
 
-def classify_all(articles: list[RawArticle], batch_size: int = 10) -> list[dict]:
+def classify_all(articles: list[RawArticle], batch_size: int = 10, max_workers: int = 8) -> list[dict]:
     if not articles:
         return []
 
     # Step 1: Python pre-classification (free, fast, deterministic)
     python_meta = [pre_classify(a) for a in articles]
 
-    # Step 2: AI enrichment in batches (grouping + generative fields only)
-    all_topics: list[dict] = []
+    # Step 2: AI enrichment — run batches in parallel to avoid sequential latency
+    batches = [
+        (i, articles[start : start + batch_size], python_meta[start : start + batch_size])
+        for i, start in enumerate(range(0, len(articles), batch_size))
+    ]
+    total_batches = len(batches)
+    results: dict[int, list[dict]] = {}
     failed = 0
-    total_batches = -(-len(articles) // batch_size)  # ceiling division
 
-    for start in range(0, len(articles), batch_size):
-        batch = articles[start : start + batch_size]
-        batch_meta = python_meta[start : start + batch_size]
-        try:
-            topics = _ai_enrich_batch(batch, batch_meta)
-            all_topics.extend(topics)
-        except Exception as e:
-            failed += 1
-            print(f"[classifier] Batch {start // batch_size} failed: {e}")
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_ai_enrich_batch, batch, meta): idx
+            for idx, batch, meta in batches
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:
+                failed += 1
+                print(f"[classifier] Batch {idx} failed: {e}")
+                traceback.print_exc()
 
     if failed == total_batches:
         raise RuntimeError(
@@ -142,5 +157,10 @@ def classify_all(articles: list[RawArticle], batch_size: int = 10) -> list[dict]
 
     if failed:
         print(f"[classifier] WARNING: {failed}/{total_batches} batches failed — some articles were not classified.")
+
+    # Reassemble in original order
+    all_topics: list[dict] = []
+    for idx in sorted(results):
+        all_topics.extend(results[idx])
 
     return all_topics

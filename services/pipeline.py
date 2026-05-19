@@ -57,6 +57,13 @@ def run_pipeline(dry_run: bool = False) -> dict:
     topics = classify_all(raw_articles)
     print(f"[pipeline] Topics after classification: {len(topics)}")
 
+    # 3. Drop pure noise — keep topics that have citizen-sector impact OR mention politicians
+    before = len(topics)
+    topics = [t for t in topics if t.get("affected_sectors") or t.get("politicians")]
+    dropped = before - len(topics)
+    if dropped:
+        print(f"[pipeline] Dropped {dropped}/{before} topics with no sector impact and no politicians")
+
     if dry_run:
         # raw_sources holds RawArticle objects — not JSON-serializable. Convert them.
         serializable_topics = []
